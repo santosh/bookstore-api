@@ -12,6 +12,8 @@ Has following endpoint:
 
 ## Usage
 
+You're free to use [Postman](https://www.getpostman.com/) instead of `curl` listed below. It's robust for API testing.
+
 ### Add a new book
 
     curl -X POST -H "Content-Type: application/json" -d '{"isbn": "0134190440", "title": "The Go Programming Language", "authors": ["Alan A. A. Donovan", "Brian W. Kernighan"], "price": "$34.57"}' http://localhost:8080/books
@@ -38,6 +40,6 @@ Pass JSON body to particular book endpoint
 
 ## Development
 
-As per dependency, _mgo needs 3.x version of mongod_ installed. This is likely to be updated as 4.x matures.
+As per dependency, currently used version of _mgo needs 3.x version of mongod_ installed. This is likely to be updated as 4.x matures.
 
  - [ ] Add unittest.
