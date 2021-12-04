@@ -1,15 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"goji.io"
 	"goji.io/pat"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 )
 
 func ErrorWithJSON(w http.ResponseWriter, message string, code int) {
@@ -25,59 +27,45 @@ func ResponseWithJSON(w http.ResponseWriter, json []byte, code int) {
 }
 
 type Book struct {
-	ISBN    string   `json:"isbn"`
-	Title   string   `json:"title"`
-	Authors []string `json:"authors"`
-	Price   string   `json:"price"`
+	ISBN    string   `json:"isbn" bson:"isbn,omitempty"`
+	Title   string   `json:"title" bson:"title,omitempty"`
+	Authors []string `json:"authors" bson:"authors,omitempty"`
+	Price   string   `json:"price" bson:"price,omitempty"`
 }
 
 func main() {
-	session, err := mgo.Dial("localhost")
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://172.19.0.2"))
 	if err != nil {
 		panic(err)
 	}
-	defer session.Close()
-
-	session.SetMode(mgo.Monotonic, true)
-	ensureIndex(session)
+	defer func() {
+		if err := client.Disconnect(context.TODO()); err != nil {
+			panic(err)
+		}
+	}()
 
 	mux := goji.NewMux()
-	mux.HandleFunc(pat.Get("/books"), allBooks(session))
-	mux.HandleFunc(pat.Post("/books"), addBook(session))
-	mux.HandleFunc(pat.Get("/books/:isbn"), bookByISBN(session))
-	mux.HandleFunc(pat.Put("/books/:isbn"), updateBook(session))
-	mux.HandleFunc(pat.Delete("/books/:isbn"), deleteBook(session))
+	mux.HandleFunc(pat.Get("/books"), allBooks(client))
+	mux.HandleFunc(pat.Post("/books"), addBook(client))
+	mux.HandleFunc(pat.Get("/books/:isbn"), bookByISBN(client))
+	mux.HandleFunc(pat.Put("/books/:isbn"), updateBook(client))
+	mux.HandleFunc(pat.Delete("/books/:isbn"), deleteBook(client))
 	http.ListenAndServe("localhost:8080", mux)
 }
 
-func ensureIndex(s *mgo.Session) {
-	session := s.Copy()
-	defer session.Close()
-
-	c := session.DB("store").C("books")
-
-	index := mgo.Index{
-		Key:        []string{"isbn"},
-		Unique:     true,
-		DropDups:   true,
-		Background: true,
-		Sparse:     true,
-	}
-	err := c.EnsureIndex(index)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func allBooks(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
+func allBooks(c *mongo.Client) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := s.Copy()
-		defer session.Close()
+		coll := c.Database("store").Collection("books")
 
-		c := session.DB("store").C("books")
+		cursor, err := coll.Find(context.TODO(), bson.M{})
+		if err != nil {
+			ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
+			log.Println("Failed get all books: ", err)
+			return
+		}
 
 		var books []Book
-		err := c.Find(bson.M{}).All(&books)
+		err = cursor.All(context.TODO(), &books)
 		if err != nil {
 			ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
 			log.Println("Failed get all books: ", err)
@@ -93,11 +81,8 @@ func allBooks(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func addBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
+func addBook(c *mongo.Client) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := s.Copy()
-		defer session.Close()
-
 		var book Book
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&book)
@@ -106,14 +91,11 @@ func addBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		c := session.DB("store").C("books")
+		coll := c.Database("store").Collection("books")
 
-		err = c.Insert(book)
+		_, err = coll.InsertOne(context.TODO(), book)
 		if err != nil {
-			if mgo.IsDup(err) {
-				ErrorWithJSON(w, "Book with this ISBN already exists", http.StatusBadRequest)
-				return
-			}
+			// FIXME: Check for duplicate document
 
 			ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
 			log.Println("Failed insert book: ", err)
@@ -126,17 +108,14 @@ func addBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func bookByISBN(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
+func bookByISBN(c *mongo.Client) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := s.Copy()
-		defer session.Close()
-
 		isbn := pat.Param(r, "isbn")
 
-		c := session.DB("store").C("books")
+		coll := c.Database("store").Collection("books")
 
 		var book Book
-		err := c.Find(bson.M{"isbn": isbn}).One(&book)
+		err := coll.FindOne(context.TODO(), bson.M{"isbn": isbn}).Decode(&book)
 		if err != nil {
 			ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
 			log.Println("Failed find book: ", err)
@@ -157,11 +136,8 @@ func bookByISBN(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func updateBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
+func updateBook(c *mongo.Client) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := s.Copy()
-		defer session.Close()
-
 		isbn := pat.Param(r, "isbn")
 
 		var book Book
@@ -172,43 +148,35 @@ func updateBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		c := session.DB("store").C("books")
+		coll := c.Database("store").Collection("books")
+		filter := bson.M{"isbn": isbn}
+		update := bson.D{{"$set", book}}
 
-		err = c.Update(bson.M{"isbn": isbn}, &book)
+		_, err = coll.UpdateOne(context.TODO(), filter, update)
 		if err != nil {
 			switch err {
 			default:
 				ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
 				log.Println("Failed update book: ", err)
 				return
-			case mgo.ErrNotFound:
-				ErrorWithJSON(w, "Book not found", http.StatusNotFound)
-				return
 			}
 		}
-
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func deleteBook(s *mgo.Session) func(w http.ResponseWriter, r *http.Request) {
+func deleteBook(c *mongo.Client) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := s.Copy()
-		defer session.Close()
-
 		isbn := pat.Param(r, "isbn")
 
-		c := session.DB("store").C("books")
+		coll := c.Database("store").Collection("books")
+		filter := bson.M{"isbn": isbn}
 
-		err := c.Remove(bson.M{"isbn": isbn})
+		_, err := coll.DeleteOne(context.TODO(), filter)
 		if err != nil {
 			switch err {
 			default:
 				ErrorWithJSON(w, "Database error", http.StatusInternalServerError)
 				log.Println("Failed delete book: ", err)
-				return
-			case mgo.ErrNotFound:
-				ErrorWithJSON(w, "Book not found", http.StatusNotFound)
 				return
 			}
 		}
